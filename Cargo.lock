@@ -369,6 +369,7 @@ dependencies = [
  "futures",
  "hex",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
