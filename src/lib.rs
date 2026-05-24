@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::convert::TryFrom;
 use std::fmt::{self, Display, Formatter};
 use std::time::Duration;
 
@@ -33,6 +34,34 @@ pub struct Reading {
     pub battery_percent: u8,
 }
 
+impl TryFrom<&[u8]> for Reading {
+    type Error = btleplug::Error;
+
+    fn try_from(data: &[u8]) -> Result<Self, Self::Error> {
+        if data.len() < 5 {
+            return Err(btleplug::Error::RuntimeError(format!(
+                "expected 5 bytes of sensor data, got {}",
+                data.len()
+            )));
+        }
+
+        let temperature_raw = i16::from_le_bytes([data[0], data[1]]);
+        let humidity_percent = data[2];
+        let battery_raw = i16::from_le_bytes([data[3], data[4]]);
+
+        let temperature_celsius = temperature_raw as f32 / 100.0;
+        let battery_voltage = battery_raw as f32 / 1000.0;
+        let battery_percent = battery_percent_from_voltage(battery_voltage);
+
+        Ok(Self {
+            temperature_celsius,
+            humidity_percent,
+            battery_voltage,
+            battery_percent,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Scanner {
     timeout: Option<Duration>,
@@ -57,13 +86,15 @@ impl Scanner {
     pub async fn scan(&self) -> btleplug::Result<Vec<Device>> {
         let manager = Manager::new().await?;
         let adapters = manager.adapters().await?;
-        let adapter = adapters
-            .into_iter()
-            .next()
-            .ok_or_else(|| btleplug::Error::RuntimeError("no Bluetooth adapters found".to_string()))?;
+        let adapter = adapters.into_iter().next().ok_or_else(|| {
+            btleplug::Error::RuntimeError("no Bluetooth adapters found".to_string())
+        })?;
 
         let timeout = self.timeout.unwrap_or(DEFAULT_SCAN_TIMEOUT);
-        let id_filter = self.id_filter.as_deref().map(|value| value.to_ascii_lowercase());
+        let id_filter = self
+            .id_filter
+            .as_deref()
+            .map(|value| value.to_ascii_lowercase());
 
         adapter.start_scan(ScanFilter::default()).await?;
         let mut elapsed = Duration::ZERO;
@@ -71,7 +102,7 @@ impl Scanner {
 
         while elapsed < timeout {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            elapsed += Duration::from_secs(1);
+            elapsed += Duration::from_millis(100);
 
             for peripheral in adapter.peripherals().await? {
                 if let Some(properties) = peripheral.properties().await? {
@@ -175,7 +206,7 @@ impl Device {
                     ))
                 })?;
             let raw = peripheral.read(&characteristic).await?;
-            parse_sensor_data(&raw)
+            Reading::try_from(raw.as_slice())
         }
         .await;
 
@@ -187,7 +218,11 @@ impl Device {
     }
 }
 
-fn build_device(id: String, properties: PeripheralProperties, peripheral: Option<Peripheral>) -> Device {
+fn build_device(
+    id: String,
+    properties: PeripheralProperties,
+    peripheral: Option<Peripheral>,
+) -> Device {
     Device {
         id,
         address: properties.address.to_string(),
@@ -220,38 +255,14 @@ fn battery_percent_from_voltage(voltage: f32) -> u8 {
     scaled.round() as u8
 }
 
-fn parse_sensor_data(data: &[u8]) -> btleplug::Result<Reading> {
-    if data.len() < 5 {
-        return Err(btleplug::Error::RuntimeError(format!(
-            "expected 5 bytes of sensor data, got {}",
-            data.len()
-        )));
-    }
-
-    let temperature_raw = i16::from_le_bytes([data[0], data[1]]);
-    let humidity_percent = data[2];
-    let battery_raw = i16::from_le_bytes([data[3], data[4]]);
-
-    let temperature_celsius = temperature_raw as f32 / 100.0;
-    let battery_voltage = battery_raw as f32 / 1000.0;
-    let battery_percent = battery_percent_from_voltage(battery_voltage);
-
-    Ok(Reading {
-        temperature_celsius,
-        humidity_percent,
-        battery_voltage,
-        battery_percent,
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Scanner, battery_percent_from_voltage, parse_sensor_data};
+    use super::{Reading, Scanner, battery_percent_from_voltage};
     use std::time::Duration;
 
     #[test]
     fn parses_lywsd03mmc_sensor_payload() {
-        let reading = parse_sensor_data(&[0xA8, 0x08, 0x17, 0xB9, 0x0B]).unwrap();
+        let reading = Reading::try_from(&[0xA8, 0x08, 0x17, 0xB9, 0x0B][..]).unwrap();
 
         assert_eq!(reading.temperature_celsius, 22.16);
         assert_eq!(reading.humidity_percent, 23);
