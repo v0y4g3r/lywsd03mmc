@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use btleplug::api::{Central, Manager as _, Peripheral as _, PeripheralProperties, ScanFilter};
 use btleplug::platform::{Manager, Peripheral};
+use log::{debug, info};
 use uuid::Uuid;
 
 const LYWSD03MMC_NAME: &str = "LYWSD03MMC";
@@ -96,13 +97,19 @@ impl Scanner {
             .as_deref()
             .map(|value| value.to_ascii_lowercase());
 
+        info!(
+            "starting LYWSD03MMC scan with timeout={}s filter={:?}",
+            timeout.as_secs(),
+            self.id_filter
+        );
+
         adapter.start_scan(ScanFilter::default()).await?;
         let mut elapsed = Duration::ZERO;
         let mut found_devices = BTreeMap::new();
 
         while elapsed < timeout {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            elapsed += Duration::from_millis(100);
+            elapsed += Duration::from_secs(1);
 
             for peripheral in adapter.peripherals().await? {
                 if let Some(properties) = peripheral.properties().await? {
@@ -119,9 +126,10 @@ impl Scanner {
                     let is_new = !found_devices.contains_key(&id);
                     found_devices.insert(id, device.clone());
                     if is_new {
-                        println!("{device}");
+                        info!("discovered {device}");
                     }
                     if matches_filter {
+                        info!("matched filter for {}", device.id);
                         let _ = adapter.stop_scan().await;
                         return Ok(found_devices.into_values().collect());
                     }
@@ -130,6 +138,7 @@ impl Scanner {
         }
 
         let _ = adapter.stop_scan().await;
+        info!("scan finished with {} device(s)", found_devices.len());
         Ok(found_devices.into_values().collect())
     }
 }
@@ -178,6 +187,7 @@ impl Display for Device {
 
 impl Device {
     pub async fn read_data(&self) -> btleplug::Result<Reading> {
+        info!("reading data from {}", self.id);
         let peripheral = self.peripheral.clone().ok_or_else(|| {
             btleplug::Error::RuntimeError(format!(
                 "device {} does not carry an attached peripheral handle",
@@ -189,11 +199,13 @@ impl Device {
 
         let mut connected_here = false;
         if !peripheral.is_connected().await? {
+            debug!("connecting to {}", self.id);
             peripheral.connect().await?;
             connected_here = true;
         }
 
         let read_result = async {
+            debug!("discovering services for {}", self.id);
             peripheral.discover_services().await?;
             let characteristic = peripheral
                 .characteristics()
@@ -205,12 +217,14 @@ impl Device {
                         self.id
                     ))
                 })?;
+            debug!("reading characteristic {} for {}", LYWSD03MMC_DATA_UUID, self.id);
             let raw = peripheral.read(&characteristic).await?;
             Reading::try_from(raw.as_slice())
         }
         .await;
 
         if connected_here {
+            debug!("disconnecting from {}", self.id);
             let _ = peripheral.disconnect().await;
         }
 
