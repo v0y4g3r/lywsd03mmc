@@ -2,6 +2,9 @@
 name = "lywsd03mmc"
 version = "0.1.1"
 edition = "2024"
+description = "Rust support for scanning and reading Xiaomi Mijia LYWSD03MMC BLE temperature and humidity sensors"
+license = "Apache-2.0"
+readme = "README.md"
 
 [[bin]]
 name = "read_lywsd03mmc"
