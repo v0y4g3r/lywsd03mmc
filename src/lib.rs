@@ -11,6 +11,8 @@ use uuid::Uuid;
 const LYWSD03MMC_NAME: &str = "LYWSD03MMC";
 const LYWSD03MMC_DATA_UUID: &str = "EBE0CCC1-7A0A-4B0C-8A1A-6FF2997DA3A6";
 const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_secs(15);
+const DATA_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const DATA_READ_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone)]
 pub struct Device {
@@ -41,16 +43,15 @@ impl TryFrom<&[u8]> for Reading {
     fn try_from(data: &[u8]) -> Result<Self, Self::Error> {
         if data.len() < 5 {
             return Err(btleplug::Error::RuntimeError(format!(
-                "expected 5 bytes of sensor data, got {}",
+                "expected at least 5 bytes of sensor data, got {}",
                 data.len()
             )));
         }
 
         let temperature_raw = i16::from_le_bytes([data[0], data[1]]);
         let humidity_percent = data[2];
-        let battery_raw = i16::from_le_bytes([data[3], data[4]]);
-
         let temperature_celsius = temperature_raw as f32 / 100.0;
+        let battery_raw = i16::from_le_bytes([data[3], data[4]]);
         let battery_voltage = battery_raw as f32 / 1000.0;
         let battery_percent = battery_percent_from_voltage(battery_voltage);
 
@@ -123,6 +124,9 @@ impl Scanner {
                         id.eq_ignore_ascii_case(filter)
                             || device.address.eq_ignore_ascii_case(filter)
                     });
+                    if id_filter.is_some() && !matches_filter {
+                        continue;
+                    }
                     let is_new = !found_devices.contains_key(&id);
                     found_devices.insert(id, device.clone());
                     if is_new {
@@ -217,9 +221,32 @@ impl Device {
                         self.id
                     ))
                 })?;
-            debug!("reading characteristic {} for {}", LYWSD03MMC_DATA_UUID, self.id);
-            let raw = peripheral.read(&characteristic).await?;
-            Reading::try_from(raw.as_slice())
+            let mut elapsed = Duration::ZERO;
+            loop {
+                debug!(
+                    "reading characteristic {} for {}",
+                    LYWSD03MMC_DATA_UUID, self.id
+                );
+                let raw = peripheral.read(&characteristic).await?;
+                if raw.len() >= 5 {
+                    break Reading::try_from(raw.as_slice());
+                }
+
+                debug!(
+                    "ignoring incomplete sensor payload from {}: {} byte(s)",
+                    self.id,
+                    raw.len()
+                );
+                if elapsed >= DATA_READ_TIMEOUT {
+                    break Err(btleplug::Error::RuntimeError(format!(
+                        "timed out waiting for 5-byte sensor data from {}",
+                        self.id
+                    )));
+                }
+
+                tokio::time::sleep(DATA_READ_RETRY_INTERVAL).await;
+                elapsed += DATA_READ_RETRY_INTERVAL;
+            }
         }
         .await;
 
@@ -282,6 +309,17 @@ mod tests {
         assert_eq!(reading.humidity_percent, 23);
         assert_eq!(reading.battery_voltage, 3.001);
         assert_eq!(reading.battery_percent, 90);
+    }
+
+    #[test]
+    fn rejects_three_byte_sensor_payload() {
+        let error = Reading::try_from(&[0xA8, 0x08, 0x17][..]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("expected at least 5 bytes of sensor data"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

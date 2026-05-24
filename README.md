@@ -14,6 +14,7 @@ The current data read is based on the `LYWSD03MMC` characteristic `EBE0CCC1-7A0A
 - Rust toolchain compatible with this project
 - Bluetooth permissions enabled for your OS
 - A machine with BLE support
+- The sensor should be updated to the latest official firmware before use
 
 This crate uses `btleplug`, so behavior depends on the platform BLE backend. On macOS, discovered devices often report the Bluetooth address as `00:00:00:00:00:00`; use the device `id` instead.
 
@@ -29,12 +30,24 @@ Build the CLI target directly:
 cargo build --bin read_lywsd03mmc
 ```
 
+Cross-compile for `aarch64` Linux with `cross`:
+
+```bash
+cross build --target aarch64-unknown-linux-gnu
+```
+
 ## CLI
 
 Run the scanner and read current temperature, humidity, battery voltage, and battery percentage:
 
 ```bash
 cargo run --bin read_lywsd03mmc -- --timeout 15
+```
+
+Emit JSON output:
+
+```bash
+cargo run --bin read_lywsd03mmc -- --timeout 15 --json
 ```
 
 Filter to a specific device `id` or MAC address:
@@ -48,6 +61,7 @@ Supported arguments:
 - `--timeout SECONDS`: scan timeout in seconds
 - `--duration SECONDS`: alias for `--timeout`
 - `--id ID_OR_MAC`: match a specific device id or MAC address
+- `--json`: emit a JSON array of successful readings
 
 ## Logging
 
@@ -69,24 +83,24 @@ use std::time::Duration;
 
 use lywsd03mmc::Scanner;
 
-# async fn demo() -> Result<(), btleplug::Error> {
-let devices = Scanner::new()
-    .with_timeout(Duration::from_secs(15))
-    .scan()
-    .await?;
+async fn demo() -> Result<(), btleplug::Error> {
+    let devices = Scanner::new()
+        .with_timeout(Duration::from_secs(15))
+        .scan()
+        .await?;
 
-for device in devices {
-    let reading = device.read_data().await?;
-    println!(
-        "{} temp={:.2}C humidity={} battery={:.3}V",
-        device,
-        reading.temperature_celsius,
-        reading.humidity_percent,
-        reading.battery_voltage
-    );
+    for device in devices {
+        let reading = device.read_data().await?;
+        println!(
+            "{} temp={:.2}C humidity={} battery={:.3}V",
+            device,
+            reading.temperature_celsius,
+            reading.humidity_percent,
+            reading.battery_voltage
+        );
+    }
+    Ok(())
 }
-# Ok(())
-# }
 ```
 
 Filter by device id or MAC:
@@ -96,14 +110,14 @@ use std::time::Duration;
 
 use lywsd03mmc::Scanner;
 
-# async fn demo() -> Result<(), btleplug::Error> {
-let devices = Scanner::new()
-    .with_timeout(Duration::from_secs(15))
-    .with_id_filter("2b56c5ee-1288-a2f1-d82f-ad70b2fd8c69")
-    .scan()
-    .await?;
-# Ok(())
-# }
+async fn demo() -> Result<(), btleplug::Error> {
+    let devices = Scanner::new()
+        .with_timeout(Duration::from_secs(15))
+        .with_id_filter("2b56c5ee-1288-a2f1-d82f-ad70b2fd8c69")
+        .scan()
+        .await?;
+    Ok(())
+}
 ```
 
 ## Testing

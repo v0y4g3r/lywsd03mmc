@@ -1,80 +1,45 @@
-use std::env;
+use std::ffi::OsString;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use lywsd03mmc::Scanner;
+use clap::Parser;
 use log::{error, info, warn};
+use lywsd03mmc::Scanner;
+use serde_json::json;
 
-fn print_usage(program: &str) {
-    eprintln!(
-        "Usage: {program} [--timeout SECONDS] [--duration SECONDS] [--id ID_OR_MAC]\n\
-         \n\
-         Options:\n\
-           --timeout SECONDS   Scan timeout in seconds\n\
-           --duration SECONDS  Alias for --timeout\n\
-           --id ID_OR_MAC      Match a specific device id or MAC address\n\
-           -h, --help          Show this help text"
-    );
+#[derive(Debug, Parser)]
+#[command(name = "read_lywsd03mmc")]
+#[command(about = "Scan for LYWSD03MMC devices and read temperature, humidity, and battery data")]
+struct Args {
+    #[arg(long, value_name = "SECONDS", conflicts_with = "duration")]
+    timeout: Option<u64>,
+
+    #[arg(long, value_name = "SECONDS", conflicts_with = "timeout")]
+    duration: Option<u64>,
+
+    #[arg(long, value_name = "ID_OR_MAC")]
+    id: Option<String>,
+
+    #[arg(long)]
+    json: bool,
 }
 
-fn parse_args() -> Result<(Option<Duration>, Option<String>), String> {
-    let mut timeout = None;
-    let mut id_filter = None;
-    let mut args = env::args();
-    let program = args.next().unwrap_or_else(|| "read_lywsd03mmc".to_string());
-    let mut rest = args;
-
-    while let Some(arg) = rest.next() {
-        match arg.as_str() {
-            "-h" | "--help" => {
-                print_usage(&program);
-                std::process::exit(0);
-            }
-            "--timeout" | "--duration" => {
-                let value = rest
-                    .next()
-                    .ok_or_else(|| format!("missing value for {arg}"))?;
-                let seconds: u64 = value
-                    .parse()
-                    .map_err(|_| format!("invalid integer value for {arg}: {value}"))?;
-                timeout = Some(Duration::from_secs(seconds));
-            }
-            "--id" => {
-                let value = rest
-                    .next()
-                    .ok_or_else(|| "missing value for --id".to_string())?;
-                id_filter = Some(value);
-            }
-            _ => {
-                return Err(format!("unknown argument: {arg}"));
-            }
-        }
+impl Args {
+    fn timeout_duration(&self) -> Option<Duration> {
+        self.timeout.or(self.duration).map(Duration::from_secs)
     }
-
-    Ok((timeout, id_filter))
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     env_logger::init();
-    let program = env::args()
-        .next()
-        .unwrap_or_else(|| "read_lywsd03mmc".to_string());
-
-    let (timeout, id_filter) = match parse_args() {
-        Ok(values) => values,
-        Err(error) => {
-            eprintln!("{error}");
-            print_usage(&program);
-            return ExitCode::FAILURE;
-        }
-    };
+    let args = Args::parse_from(std::env::args_os().collect::<Vec<OsString>>());
 
     let mut scanner = Scanner::new();
-    if let Some(timeout) = timeout {
+    if let Some(timeout) = args.timeout_duration() {
         scanner = scanner.with_timeout(timeout);
     }
-    if let Some(id_filter) = id_filter {
+    if let Some(id_filter) = args.id {
         scanner = scanner.with_id_filter(id_filter);
     }
 
@@ -92,20 +57,50 @@ async fn main() -> ExitCode {
     }
 
     info!("reading {} device(s)", devices.len());
+    let mut json_readings = Vec::new();
     for device in devices {
         match device.read_data().await {
             Ok(reading) => {
-                println!(
-                    "{} temperature_celsius={:.2} humidity_percent={} battery_voltage={:.3} battery_percent={}",
-                    device,
-                    reading.temperature_celsius,
-                    reading.humidity_percent,
-                    reading.battery_voltage,
-                    reading.battery_percent,
-                );
+                if args.json {
+                    json_readings.push(json!({
+                        "id": device.id,
+                        "address": device.address,
+                        "address_type": device.address_type,
+                        "name": device.name,
+                        "rssi": device.rssi,
+                        "tx_power_level": device.tx_power_level,
+                        "services": device.services,
+                        "manufacturer_data": device.manufacturer_data,
+                        "service_data": device.service_data,
+                        "class": device.class,
+                        "temperature_celsius": reading.temperature_celsius,
+                        "humidity_percent": reading.humidity_percent,
+                        "battery_voltage": reading.battery_voltage,
+                        "battery_percent": reading.battery_percent,
+                    }));
+                } else {
+                    println!(
+                        "{} temperature_celsius={:.2} humidity_percent={} battery_voltage={:.3} battery_percent={}",
+                        device,
+                        reading.temperature_celsius,
+                        reading.humidity_percent,
+                        reading.battery_voltage,
+                        reading.battery_percent,
+                    );
+                }
             }
             Err(error) => {
                 error!("read failed for {}: {error}", device.id);
+            }
+        }
+    }
+
+    if args.json {
+        match serde_json::to_string(&json_readings) {
+            Ok(output) => println!("{output}"),
+            Err(error) => {
+                error!("failed to encode JSON output: {error}");
+                return ExitCode::FAILURE;
             }
         }
     }
